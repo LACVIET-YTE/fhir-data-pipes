@@ -46,10 +46,29 @@
 # to /opt/bitnami/spark/conf/
 # https://spark.apache.org/docs/latest/configuration.html
 
-# Version 2.4 supports healthcheck feature.
-version: '2.4'
-
 services:
+  fhir-views-db:
+    image: postgres:15
+    container_name: fhir-views-db
+    restart: always
+    environment:
+      POSTGRES_DB: views
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+    ports:
+      - '5436:5432'
+    volumes:
+      - fhir_views_db_data:/var/lib/postgresql/data
+    networks:
+      - cloudbuild
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d views"]
+      interval: 10s
+      retries: 5
+      start_period: 10s
+      timeout: 5s
+
   pipeline-controller:
     # to force a build use `--build` option of `docker-compose up`.
     build:
@@ -67,7 +86,7 @@ services:
       - FHIRDATA_GENERATEPARQUETFILES=${FHIRDATA_GENERATEPARQUETFILES:-true}
       - FHIRDATA_CREATEHIVERESOURCETABLES=${FHIRDATA_CREATEHIVERESOURCETABLES:-true}
       - FHIRDATA_CREATEPARQUETVIEWS=${FHIRDATA_CREATEPARQUETVIEWS:-true}
-      - FHIRDATA_SINKDBCONFIGPATH=${FHIRDATA_SINKDBCONFIGPATH:-config/hapi-postgres-config_local_views.json}
+      - FHIRDATA_SINKDBCONFIGPATH=${FHIRDATA_SINKDBCONFIGPATH:-config/fhir-views-db-config.json}
       - FHIRDATA_NUMTHREADS=${FHIRDATA_NUMTHREADS:--1}
     ports:
       - '8090:8080'
@@ -76,6 +95,8 @@ services:
       - default
     depends_on:
       spark:
+        condition: service_healthy
+      fhir-views-db:
         condition: service_healthy
 
   spark:
@@ -86,6 +107,8 @@ services:
       - --driver-memory
       # You may need to increase this if your queries/data are too large.
       - 5g
+      - --conf
+      - spark.sql.parquet.mergeSchema=false
     environment:
       - HIVE_SERVER2_THRIFT_PORT=10000
     ports:
@@ -97,8 +120,10 @@ services:
       # If you want to persist the Metastore data, e.g., table and view
       # definitions, you can use an external database by adjusting hive-site.xml
       #- ./hive-site_example.xml:/opt/bitnami/spark/conf/hive-site.xml
-      # Note to use an external DB, you need to provide its driver jar too:
-      #- ./postgresql-42.6.0.jar:/opt/bitnami/spark/jars/postgresql-42.6.0.jar
+      # Postgres JDBC driver: needed for views (e.g. Encounter_fact_view) that
+      # push their results into the fhir-views-db Postgres instance via a
+      # `CREATE TABLE ... USING jdbc` + `INSERT INTO` sink table.
+      - ./postgresql-42.7.4.jar:/opt/bitnami/spark/jars/postgresql-42.7.4.jar
       - spark_vol_single:/opt/bitnami/spark
     networks:
       - cloudbuild
@@ -113,6 +138,7 @@ services:
 
 volumes:
   spark_vol_single:
+  fhir_views_db_data:
 
 networks:
   cloudbuild:
