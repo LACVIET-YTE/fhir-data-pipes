@@ -1,3 +1,3 @@
-INSERT OVERWRITE TABLE encounter_hospitalization_fact
+INSERT OVERWRITE TABLE Fact_Encounter_Hospitalization
 SELECT * FROM Encounter_hospitalization_fact_view
 ;

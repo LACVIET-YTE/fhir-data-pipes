@@ -1,71 +1,119 @@
 CREATE OR REPLACE VIEW Encounter_fact_view AS
+-- Grain: 1 row = 1 Encounter. KHÔNG nổ số dòng: mọi field 1-nhiều (diagnosis[],
+-- reasonCode[], identifier[]) được đẩy ra các bảng "bridge" riêng thay vì nối chuỗi/
+-- chọn đại diện ngay trên Fact_Encounter - xem:
+--   Encounter_diagnosis_fact.sql  (Fact_Encounter_Diagnosis - nối Dim_Condition)
+--   Encounter_reason_fact.sql     (Fact_Encounter_Reason)
+--   Encounter_identifier_fact.sql (Fact_Encounter_Identifier)
+-- Tiền/bảo hiểm (MedicationAmount, HospitalTotalAmount, InsuranceEligibleTotalAmount...)
+-- và các field thuộc Claim/ExplanationOfBenefit/Coverage KHÔNG đưa vào đây nữa - các
+-- resource đó đã có Fact_Claim (Claim_fact.sql), Fact_ExplanationOfBenefit
+-- (ExplanationOfBenefit_fact.sql), Dim_Coverage (Coverage_dim.sql) riêng, join được
+-- sang Fact_Encounter qua EncounterID/PatientID sẵn có trên các bảng đó - không nhân
+-- bản logic. Mọi cột dưới đây lấy trực tiếp từ field thật trên resource Encounter
+-- (không tự sinh/nối chuỗi thêm).
 WITH base AS (
   SELECT
     E.id AS EncounterID,
-    try_element_at(E.identifier, 1).value AS IdentifierValue,
-    try_element_at(E.identifier, 1).system AS IdentifierSystem,
     E.subject.patientId AS PatientID,
     E.status AS EncounterStatus,
-    E.class.code AS EncounterClassCode,
-    E.class.system AS EncounterClassSystem,
-    E.class.display AS EncounterClassDisplay,
-    try_element_at(try_element_at(E.type, 1).coding, 1).code AS EncounterTypeCode,
-    COALESCE(try_element_at(try_element_at(E.type, 1).coding, 1).display, try_element_at(E.type, 1).text) AS EncounterTypeDisplay,
-    try_element_at(E.serviceType.coding, 1).code AS ServiceTypeCode,
-    COALESCE(try_element_at(E.serviceType.coding, 1).display, E.serviceType.text) AS ServiceTypeDisplay,
-    try_element_at(E.priority.coding, 1).code AS PriorityCode,
-    COALESCE(try_element_at(E.priority.coding, 1).display, E.priority.text) AS PriorityDisplay,
-    CAST(date_format(to_timestamp(E.period.start), 'yyyyMMdd') AS INT) AS CheckInDateKey,
-    to_timestamp(E.period.start) AS CheckInTime,
-    to_timestamp(E.period.end) AS EncounterEndTime,
-    (unix_timestamp(to_timestamp(E.period.end)) - unix_timestamp(to_timestamp(E.period.start))) / 60 AS EncounterDurationMinutes,
-    datediff(to_timestamp(E.period.end), to_timestamp(E.period.start)) AS EncounterDurationDays,
-    E.serviceProvider.organizationId AS ServiceProviderOrganizationID,
-    E.serviceProvider.display AS ServiceProviderOrganizationDisplay,
-    try_element_at(E.location, 1).location.locationId AS PrimaryLocationID,
-    try_element_at(E.location, 1).location.display AS PrimaryLocationDisplay,
-    try_element_at(filter(E.participant, PP -> PP.individual.practitionerId IS NOT NULL), 1).individual.practitionerId AS PrimaryPractitionerID,
-    try_element_at(filter(E.participant, PP -> PP.individual.practitionerRoleId IS NOT NULL), 1).individual.practitionerRoleId AS PrimaryPractitionerRoleID,
-    try_element_at(filter(E.participant, PP -> PP.individual.practitionerId IS NOT NULL OR PP.individual.practitionerRoleId IS NOT NULL), 1).period.start AS PrimaryPractitionerStartTime,
-    try_element_at(E.appointment, 1).appointmentId AS AppointmentID,
-    try_element_at(try_element_at(E.reasonCode, 1).coding, 1).code AS ReasonCode,
-    COALESCE(try_element_at(try_element_at(E.reasonCode, 1).coding, 1).display, try_element_at(E.reasonCode, 1).text) AS ReasonDisplay,
-    CASE
-      WHEN try_element_at(E.reasonReference, 1).conditionId IS NOT NULL THEN 'Condition'
-      WHEN try_element_at(E.reasonReference, 1).procedureId IS NOT NULL THEN 'Procedure'
-      WHEN try_element_at(E.reasonReference, 1).observationId IS NOT NULL THEN 'Observation'
-      WHEN try_element_at(E.reasonReference, 1).immunizationRecommendationId IS NOT NULL THEN 'ImmunizationRecommendation'
-    END AS ReasonReferenceType,
-    COALESCE(
-      try_element_at(E.reasonReference, 1).conditionId,
-      try_element_at(E.reasonReference, 1).procedureId,
-      try_element_at(E.reasonReference, 1).observationId,
-      try_element_at(E.reasonReference, 1).immunizationRecommendationId
-    ) AS ReasonReferenceID,
-    E.partOf.encounterId AS PartOfEncounterID,
+
+    try_element_at(
+      filter(try_element_at(E.type, 1).coding, C -> C.system = 'http://fhir.hl7.org.vn/core/CodeSystem/vn-encounter-type-cs'),
+      1
+    ).code AS EncounterClassCode,
+    try_element_at(
+      filter(try_element_at(E.type, 1).coding, C -> C.system = 'http://fhir.hl7.org.vn/core/CodeSystem/vn-encounter-type-cs'),
+      1
+    ).display AS EncounterClassDisplay,
+
+    try_element_at(
+      filter(E.hospitalization.dischargeDisposition.coding, C -> C.system = 'http://fhir.hl7.org.vn/core/CodeSystem/vn-discharge-disposition-cs'),
+      1
+    ).code AS DischargeDispositionCode,
+    try_element_at(
+      filter(E.hospitalization.dischargeDisposition.coding, C -> C.system = 'http://fhir.hl7.org.vn/core/CodeSystem/vn-discharge-disposition-cs'),
+      1
+    ).display AS DischargeDispositionDisplay,
+
+    to_timestamp(E.period.start) AS EncounterStartDateTime,
+    to_date(E.period.start) AS EncounterStartDate,
+    to_timestamp(E.period.end) AS EncounterEndDateTime,
+    to_date(E.period.end) AS EncounterEndDate,
+    CASE WHEN E.class.code = 'IMP' THEN to_timestamp(E.period.start) END AS InpatientAdmitDateTime,
+    CASE WHEN E.class.code = 'IMP' THEN to_date(E.period.start) END AS InpatientAdmitDate,
+    datediff(to_timestamp(E.period.end), to_timestamp(E.period.start)) AS LengthOfStayDays,
+
+    -- DepartmentCodes: Encounter.serviceType.text trên nguồn đã là chuỗi mã khoa/phòng
+    -- nối nhau bằng ';' sẵn (vd "K0102;K01;K03") - lấy nguyên văn, không tự nối thêm.
+    E.serviceType.text AS DepartmentCodes,
+
+    -- ReferralFromFacilityCode: Encounter.hospitalization.origin = nơi bệnh nhân được
+    -- chuyển đến từ đó trước khi nhập viện/khám (đúng ngữ nghĩa FHIR "origin"), field
+    -- đơn (0..1) nên lấy thẳng, không phải nối/chọn từ mảng.
+    E.hospitalization.origin.identifier.value AS ReferralFromFacilityCode,
+
     E.class.code = 'IMP' AS IsInpatientFlag,
     E.class.code = 'EMER' AS IsEmergencyFlag,
-    E.meta.lastUpdated AS SourceLastUpdated
+    E.serviceProvider.organizationId AS ServiceProviderOrganizationID,
+    to_timestamp(E.meta.lastUpdated) AS SourceLastUpdated
   FROM Encounter AS E
 ),
-patient_order AS (
-  SELECT EncounterID,
-    ROW_NUMBER() OVER (PARTITION BY PatientID ORDER BY CheckInTime) = 1 AS IsNewPatientFlag
-  FROM base
-),
-inpatient_readmission AS (
-  SELECT EncounterID,
-    CASE
-      WHEN LAG(EncounterEndTime) OVER (PARTITION BY PatientID ORDER BY CheckInTime) IS NOT NULL
-        AND datediff(CheckInTime, LAG(EncounterEndTime) OVER (PARTITION BY PatientID ORDER BY CheckInTime)) BETWEEN 0 AND 30
-      THEN TRUE
-      ELSE FALSE
-    END AS IsReadmission30dFlag
-  FROM base
-  WHERE IsInpatientFlag
+
+-- PatientCategoryCode/Display (vn-ext-insurance-visit-type) và
+-- TreatmentOutcomeCode/Name (vn-ext-treatment-outcome) nằm trong
+-- Encounter.extension, nhưng cột `extension` không tồn tại trong bảng
+-- Encounter mà pipeline Spark/Bunsen sinh ra (Bunsen loại field mở này khi
+-- convert FHIR -> Parquet nếu không đăng ký custom profile qua
+-- structureDefinitionsPath; và việc đăng ký profile vn-core-encounter lại
+-- đụng giới hạn regex hard-code trong bunsen-core chỉ nhận URL dạng
+-- http://hl7.org/fhir/...).
+-- [THỬ NGHIỆM] Nên đọc qua ViewDefinition (SQL-on-FHIR v2, FHIRPath) thay vì
+-- Bunsen: config/views/encounter_extension_view.json chạy FHIRPath
+-- extension(...) thẳng trên resource Encounter gốc (ViewApplicator, không qua
+-- Bunsen nên không bị giới hạn trên), pipeline-controller tự đăng ký kết quả
+-- thành Hive/Spark view `default.encounter_extension`. Cách này thay cho
+-- việc đọc /dwh/extension-source/encounter_raw.ndjson do service nền
+-- extension-source-refresh (docker/extension-source-refresh) tải về - service
+-- đó tạm thời vẫn giữ nguyên (chưa xoá) cho tới khi xác nhận cách mới này
+-- chạy đúng qua 1 lần pipeline thật.
+-- Đây vẫn là field thật trên Encounter (2 giá trị đơn, không phải mảng 1-nhiều) - chỉ
+-- là đường đọc khác do giới hạn kỹ thuật của Bunsen, không phải cột tự sinh.
+ext_values AS (
+  SELECT
+    id AS EncounterID,
+    PatientCategoryCode,
+    PatientCategoryDisplay,
+    TreatmentOutcomeCode,
+    TreatmentOutcomeName
+  FROM encounter_extension
 )
-SELECT b.*, po.IsNewPatientFlag, COALESCE(ir.IsReadmission30dFlag, FALSE) AS IsReadmission30dFlag
-FROM base AS b
-  LEFT JOIN patient_order AS po ON po.EncounterID = b.EncounterID
-  LEFT JOIN inpatient_readmission AS ir ON ir.EncounterID = b.EncounterID
+
+SELECT
+  b.EncounterID,
+  b.PatientID,
+  b.EncounterStatus,
+  b.EncounterClassCode,
+  b.EncounterClassDisplay,
+  b.EncounterStartDateTime,
+  b.EncounterStartDate,
+  b.EncounterEndDateTime,
+  b.EncounterEndDate,
+  b.InpatientAdmitDateTime,
+  b.InpatientAdmitDate,
+  b.LengthOfStayDays,
+  b.DepartmentCodes,
+  b.ReferralFromFacilityCode,
+  b.DischargeDispositionCode,
+  b.DischargeDispositionDisplay,
+  ext.TreatmentOutcomeCode,
+  ext.TreatmentOutcomeName,
+  ext.PatientCategoryCode,
+  ext.PatientCategoryDisplay,
+  b.IsInpatientFlag,
+  b.IsEmergencyFlag,
+  b.ServiceProviderOrganizationID,
+  b.SourceLastUpdated
+FROM base b
+LEFT JOIN ext_values ext ON ext.EncounterID = b.EncounterID
 ;

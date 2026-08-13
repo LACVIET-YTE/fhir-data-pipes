@@ -1,8 +1,8 @@
-CREATE TABLE IF NOT EXISTS encounter_participant_fact
+CREATE TABLE IF NOT EXISTS Fact_Encounter_Participant
 USING org.apache.spark.sql.jdbc
 OPTIONS (
   url 'jdbc:postgresql://fhir-views-db:5432/views',
-  dbtable 'encounter_participant_fact',
+  dbtable '"Fact_Encounter_Participant"',
   user 'admin',
   password 'admin',
   driver 'org.postgresql.Driver'
