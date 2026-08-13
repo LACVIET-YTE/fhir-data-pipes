@@ -15,7 +15,11 @@
 # This creates a docker image for running the controller web-app. It is expected
 # that in real use-cases, the config dir will be mounted to the host machine.
 
-FROM maven:3.8.7-eclipse-temurin-17-focal as build
+# --platform=$BUILDPLATFORM: khi build multi-arch, stage này luôn chạy native
+# trên kiến trúc của máy build (amd64 trên runner GitHub) thay vì bị emulate.
+# An toàn vì output là bytecode Java + JS — không phụ thuộc kiến trúc, và các
+# pom.xml không dùng profile theo os/arch. Chỉ stage `main` mới cần QEMU.
+FROM --platform=$BUILDPLATFORM maven:3.8.7-eclipse-temurin-17-focal as build
 
 RUN apt-get update && apt-get install -y nodejs npm
 RUN npm cache clean -f && npm install -g n && n stable
