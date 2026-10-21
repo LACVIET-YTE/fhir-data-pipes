@@ -292,14 +292,21 @@ public class ParquetUtil {
   private synchronized void write(Resource resource, ViewDefinition vDef)
       throws IOException, ProfileException, ViewApplicationException {
     Preconditions.checkNotNull(resource.fhirType());
-    WriterWithCache parquetWriter = viewWriterMap.get(vDef.getName());
-    if (parquetWriter == null) {
-      parquetWriter = createWriter("", vDef);
-    }
     ViewApplicator applicator = new ViewApplicator(vDef);
     RowList rows = applicator.apply(resource);
     // TODO: This creates the schema separately for each resource which is inefficient; fix it!
     List<GenericRecord> result = ViewSchema.setValueInRecord(rows, vDef);
+    if (result.isEmpty()) {
+      // Create the writer (and its file) only once there is a row to write. flushViewWriter()
+      // never closes a writer with getDataSize() == 0, so a writer opened for a view that
+      // yields no rows leaves a 0-byte file without a Parquet footer, which ParquetMerger then
+      // fails to read ("length is too low: 0"), failing every subsequent merge.
+      return;
+    }
+    WriterWithCache parquetWriter = viewWriterMap.get(vDef.getName());
+    if (parquetWriter == null) {
+      parquetWriter = createWriter("", vDef);
+    }
     for (GenericRecord record : result) {
       parquetWriter.write(record);
     }
